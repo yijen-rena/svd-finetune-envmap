@@ -15,11 +15,16 @@
 # limitations under the License.
 
 """Script to fine-tune Stable Video Diffusion."""
+import os
+os.environ["HF_HOME"] = "/ocean/projects/cis250002p/rju/huggingface"
+
+import pdb
+
 import argparse
 import random
 import logging
 import math
-import os
+# import os
 import cv2
 import shutil
 from pathlib import Path
@@ -46,7 +51,7 @@ from einops import rearrange
 import diffusers
 from diffusers import StableVideoDiffusionPipeline
 from diffusers.models.lora import LoRALinearLayer
-from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler, UNetSpatioTemporalConditionModel
+from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler # UNetSpatioTemporalConditionModel
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
@@ -54,6 +59,8 @@ from diffusers.utils import check_min_version, deprecate, is_wandb_available, lo
 from diffusers.utils.import_utils import is_xformers_available
 
 from torch.utils.data import Dataset
+
+from unet_spatio_temporal_envmap_condition import UNetSpatioTemporalConditionModel
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.24.0.dev0")
@@ -98,7 +105,7 @@ class DummyDataset(Dataset):
         chosen_folder = random.choice(self.folders)
         folder_path = os.path.join(self.base_folder, chosen_folder)
         frames = os.listdir(folder_path)
-        # Sort the frames by name
+        # Sort the frames by name # TODO: make sure this is sorted by int(frame_number)
         frames.sort()
 
         # Ensure the selected folder has at least `sample_frames`` frames
@@ -120,6 +127,8 @@ class DummyDataset(Dataset):
                 # Resize the image and convert it to a tensor
                 img_resized = img.resize((self.width, self.height))
                 img_tensor = torch.from_numpy(np.array(img_resized)).float()
+                
+                img_tensor = img_tensor[..., :3]
 
                 # Normalize the image by scaling pixel values to [-1, 1]
                 img_normalized = img_tensor / 127.5 - 1
@@ -757,6 +766,7 @@ def main():
 
     parameters_list = []
 
+    # TODO: change the parameters that need to be trained
     # Customize the parameters that need to be trained; if necessary, you can uncomment them yourself.
     for name, param in unet.named_parameters():
         if 'temporal_transformer_block' in name:
