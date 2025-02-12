@@ -5,12 +5,15 @@ import cv2
 import torch.nn.functional as F
 from PIL import Image
 import os
+from pathlib import Path
 import argparse
 from glob import glob
 from tqdm import tqdm
 import traceback
 import torchvision
 from torchvision import transforms
+import random
+import shutil
 
 from kornia import create_meshgrid
 
@@ -328,5 +331,43 @@ def linear2srgb_torch(tensor_0to1):
     return tensor_srgb
 
 
+def split_dataset(source_dir, train_dir, val_dir, val_ratio=0.05):
+    # Create train and val directories if they don't exist
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(val_dir, exist_ok=True)
+    
+    # Get all HDR files from the source directory
+    hdri_folders = [f for f in os.listdir(source_dir) if os.path.isdir(os.path.join(source_dir, f))]
+    
+    # Calculate number of files for validation set
+    num_files = len(hdri_folders)
+    num_val = int(num_files * val_ratio)
+    
+    # Randomly select files for validation set
+    val_files = random.sample(hdri_folders, num_val)
+    
+    # Copy files to respective directories
+    for folder in hdri_folders:
+        src_folder = os.path.join(source_dir, folder)
+        
+        if folder in val_files:
+            dst_folder = os.path.join(val_dir, folder)
+        else:
+            dst_folder = os.path.join(train_dir, folder)
+            
+        shutil.copytree(src_folder, dst_folder)
+    
+    # Print statistics
+    print(f"Total files: {num_files}")
+    print(f"Training files: {num_files - num_val}")
+    print(f"Validation files: {num_val}")
+
 if __name__ == "__main__":
-    envir_map = read_hdr("../datasets/haven/hdris/abandoned_bakery/abandoned_bakery_2k.hdr")
+    # Define paths
+    source_path = "../datasets/haven/hdris"
+    train_path = "../datasets/haven/hdris/train"
+    val_path = "../datasets/haven/hdris/val"
+    
+    random.seed(42)
+    
+    split_dataset(source_path, train_path, val_path)

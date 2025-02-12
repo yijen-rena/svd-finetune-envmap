@@ -62,6 +62,8 @@ from torch.utils.data import Dataset
 
 from unet_spatio_temporal_envmap_condition import UNetSpatioTemporalConditionModel
 
+from utils import *
+
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.24.0.dev0")
 
