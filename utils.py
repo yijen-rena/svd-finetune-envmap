@@ -19,7 +19,7 @@ from kornia import create_meshgrid
 
 import pdb
 
-def generate_plucker_rays(T, shape, fov, sensor_size=(1.0, 1.0)):
+def generate_plucker_rays(T, shape, fov = (35, 35), sensor_size=(1.0, 1.0)):
     """
     Generate Plücker rays for each pixel of the image based on a camera transformation matrix.
 
@@ -73,6 +73,34 @@ def generate_plucker_rays(T, shape, fov, sensor_size=(1.0, 1.0)):
     ], axis=0)
     # origins = np.tile(t[:, np.newaxis, np.newaxis], (1, H, W))  # Shape: (3, H, W)
     return plucker_rays
+
+def generate_directional_embeddings(shape=(256, 256), world2cam=None, normalize=True):
+    height, width = shape
+
+    u = np.linspace(0, 1, width, endpoint=False)
+    v = np.linspace(0, 1, height, endpoint=False)
+    U, V = np.meshgrid(u, v)
+
+    theta = np.pi * V 
+    phi = 2 * np.pi * U 
+
+    x = np.sin(theta) * np.cos(phi)
+    y = -np.sin(theta) * np.sin(phi)
+    z = -np.cos(theta)
+
+    embeddings = np.stack((x, y, z), axis=-1)
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=-1, keepdims=True)
+
+    if normalize:
+        embeddings = (embeddings + 1) / 2
+
+    if world2cam is not None:
+        R = world2cam[:3, :3]
+        embeddings_flat = embeddings.reshape(-1, 3)
+        embeddings_flat = embeddings_flat @ R.T
+        embeddings = embeddings_flat.reshape(height, width, 3)
+
+    return embeddings
 
 ##### Below are functions for preprocessing environment map, copied from Neural Gaffer #####
 
@@ -157,48 +185,30 @@ def process_im(im):
     )
     return image_transforms(im)
 
+def get_aligned_RT(cam2world):
+    world2cam = np.linalg.inv(cam2world)
+    aligned_RT = world2cam[:3, :]
+    return aligned_RT
 
 
-def rotate_and_preprcess_envir_map(envir_map, aligned_RT, rotation_idx=0, total_view=120):
-    # envir_map: [H, W, 3]
-    # aligned_RT: numpy.narray [3, 4] w2c
-    # the coordinate system follows Blender's convention
+def reinhard_tonemap(hdr_image):
+    """
+    Basic Reinhard global operator.
+    """
+    # Convert to luminance (perceived brightness)
+    luminance = 0.2126 * hdr_image[...,0] + \
+                0.7152 * hdr_image[...,1] + \
+                0.0722 * hdr_image[...,2]
     
-    # c_x_axis, c_y_axis, c_z_axis = aligned_RT[0, :3], aligned_RT[1, :3], aligned_RT[2, :3]
-    env_h, env_w = envir_map.shape[0], envir_map.shape[1]
- 
-    light_area_weight, view_dirs = generate_envir_map_dir(env_h, env_w)
+    # Apply tone mapping to luminance
+    L_mapped = luminance / (1 + luminance)
     
-    axis_aligned_transform = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]]) # Blender's convention
-    axis_aligned_R = axis_aligned_transform @ aligned_RT[:3, :3] # [3, 3]
-    view_dirs_world = view_dirs @ axis_aligned_R # [envH * envW, 3]
+    # Preserve color ratios
+    result = np.zeros_like(hdr_image)
+    for i in range(3):
+        result[...,i] = (hdr_image[...,i] / (luminance + 1e-6)) * L_mapped
     
-    # rotate the envir map along the z-axis
-    rotated_z_radius = (-2 * np.pi * rotation_idx / total_view) 
-    # [3, 3], left multiplied by the view_dirs_world
-    rotation_maxtrix = np.array([[np.cos(rotated_z_radius), -np.sin(rotated_z_radius), 0],
-                                [np.sin(rotated_z_radius), np.cos(rotated_z_radius), 0],
-                                [0, 0, 1]])
-    view_dirs_world = view_dirs_world @ rotation_maxtrix        
-    
-    rotated_hdr_rgb = get_light(envir_map, view_dirs_world)
-    rotated_hdr_rgb = rotated_hdr_rgb.reshape(env_h, env_w, 3)
-    
-    rotated_hdr_rgb = np.array(rotated_hdr_rgb, dtype=np.float32)
-
-    # ldr
-    envir_map_ldr = rotated_hdr_rgb.clip(0, 1)
-    envir_map_ldr = envir_map_ldr ** (1/2.2)
-    # hdr
-    envir_map_hdr = np.log1p(10 * rotated_hdr_rgb)
-    # rescale to [0, 1]
-    envir_map_hdr = envir_map_hdr / np.max(envir_map_hdr)
-    envir_map_ldr = np.uint8(envir_map_ldr * 255)
-    envir_map_ldr = Image.fromarray(envir_map_ldr)
-    envir_map_hdr = np.uint8(envir_map_hdr * 255)
-    envir_map_hdr = Image.fromarray(envir_map_hdr)
-
-    return envir_map_ldr, envir_map_hdr
+    return np.clip(result, 0, 1)
 
 def get_rays(directions, c2w):
     """
@@ -287,6 +297,100 @@ def get_envir_map_light(envir_map, incident_dir):
 
     return light_rgbs
 
+def rotate_and_preprocess_envir_map(envir_map, aligned_RT, rotation_idx=0, total_view=120, visualize=False, output_dir=None):
+    # envir_map: [H, W, 3]
+    # aligned_RT: numpy.narray [3, 4] w2c
+    # the coordinate system follows Blender's convention
+    
+    # c_x_axis, c_y_axis, c_z_axis = aligned_RT[0, :3], aligned_RT[1, :3], aligned_RT[2, :3]
+    env_h, env_w = envir_map.shape[0], envir_map.shape[1]
+ 
+    light_area_weight, view_dirs = generate_envir_map_dir(env_h, env_w)
+    
+    axis_aligned_transform = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]]) # Blender's convention
+    axis_aligned_R = axis_aligned_transform @ aligned_RT[:3, :3] # [3, 3]
+    view_dirs_world = view_dirs @ axis_aligned_R # [envH * envW, 3]
+    
+    # rotate the envir map along the z-axis
+    rotated_z_radius = (-2 * np.pi * rotation_idx / total_view) 
+    # [3, 3], left multiplied by the view_dirs_world
+    rotation_maxtrix = np.array([[np.cos(rotated_z_radius), -np.sin(rotated_z_radius), 0],
+                                [np.sin(rotated_z_radius), np.cos(rotated_z_radius), 0],
+                                [0, 0, 1]])
+    view_dirs_world = view_dirs_world @ rotation_maxtrix        
+    
+    rotated_hdr_rgb = get_light(envir_map, view_dirs_world)
+    rotated_hdr_rgb = rotated_hdr_rgb.reshape(env_h, env_w, 3)
+    
+    rotated_hdr_rgb = np.array(rotated_hdr_rgb, dtype=np.float32)
+
+    # ldr
+    # envir_map_ldr = rotated_hdr_rgb.clip(0, 1)
+    # envir_map_ldr = envir_map_ldr ** (1/2.2)
+    envir_map_ldr = reinhard_tonemap(rotated_hdr_rgb)
+    
+    # hdr
+    # envir_map_hdr = np.log1p(10 * rotated_hdr_rgb)
+    
+    # log
+    envir_map_log = np.log(rotated_hdr_rgb + 1) / np.max(rotated_hdr_rgb)
+
+    # dir
+    envir_map_dir = generate_directional_embeddings((env_h, env_w), world2cam=aligned_RT)
+
+    if visualize:
+        envir_map_ldr_viz = np.uint8(envir_map_ldr * 255)
+        envir_map_ldr_viz = Image.fromarray(envir_map_ldr_viz)
+        envir_map_ldr_viz.save(os.path.join(output_dir, f"envir_map_ldr.png"))
+        
+        envir_map_log_viz = np.uint8(envir_map_log * 255)
+        envir_map_log_viz = Image.fromarray(envir_map_log_viz)
+        envir_map_log_viz.save(os.path.join(output_dir, f"envir_map_log.png"))
+        
+        envir_map_dir_viz = np.uint8(envir_map_dir * 255)
+        envir_map_dir_viz = Image.fromarray(envir_map_dir_viz)
+        envir_map_dir_viz.save(os.path.join(output_dir, f"envir_map_dir.png"))
+
+    
+    envir_map_ldr = torch.from_numpy(envir_map_ldr).permute(2, 0, 1)
+    envir_map_log = torch.from_numpy(envir_map_log).permute(2, 0, 1)
+    envir_map_dir = torch.from_numpy(envir_map_dir).permute(2, 0, 1)
+
+    return envir_map_ldr, envir_map_log, envir_map_dir
+
+def visualize_rotated_envir_map(envir_map_path, output_dir, cam2world=None):
+    os.makedirs(output_dir, exist_ok=True)
+    
+    envir_map = read_hdr(envir_map_path)
+    cam2world = np.array(    [[
+      -0.5613548386268539,
+      -0.2528528790275295,
+      0.7880013748196818,
+      2.258120297103094
+    ],
+    [
+      0.6060208127386796,
+      -0.7740303709954632,
+      0.18334600978525858,
+      0.5254013343204738
+    ],
+    [
+      0.563577430064201,
+      0.5804674033433017,
+      0.5877398012540206,
+      1.9039028761219154
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]])
+    aligned_RT = get_aligned_RT(cam2world)
+    
+    envir_map_ldr, envir_map_log, envir_map_dir = rotate_and_preprocess_envir_map(envir_map, aligned_RT, visualize=True, output_dir=output_dir)
+
+
 def _clip_0to1_warn_torch(tensor_0to1):
     """Enforces [0, 1] on a tensor/array that should be already [0, 1].
     """
@@ -330,44 +434,7 @@ def linear2srgb_torch(tensor_0to1):
 
     return tensor_srgb
 
-
-def split_dataset(source_dir, train_dir, val_dir, val_ratio=0.05):
-    # Create train and val directories if they don't exist
-    os.makedirs(train_dir, exist_ok=True)
-    os.makedirs(val_dir, exist_ok=True)
-    
-    # Get all HDR files from the source directory
-    hdri_folders = [f for f in os.listdir(source_dir) if os.path.isdir(os.path.join(source_dir, f))]
-    
-    # Calculate number of files for validation set
-    num_files = len(hdri_folders)
-    num_val = int(num_files * val_ratio)
-    
-    # Randomly select files for validation set
-    val_files = random.sample(hdri_folders, num_val)
-    
-    # Copy files to respective directories
-    for folder in hdri_folders:
-        src_folder = os.path.join(source_dir, folder)
-        
-        if folder in val_files:
-            dst_folder = os.path.join(val_dir, folder)
-        else:
-            dst_folder = os.path.join(train_dir, folder)
-            
-        shutil.copytree(src_folder, dst_folder)
-    
-    # Print statistics
-    print(f"Total files: {num_files}")
-    print(f"Training files: {num_files - num_val}")
-    print(f"Validation files: {num_val}")
-
 if __name__ == "__main__":
-    # Define paths
-    source_path = "../datasets/haven/hdris"
-    train_path = "../datasets/haven/hdris/train"
-    val_path = "../datasets/haven/hdris/val"
-    
-    random.seed(42)
-    
-    split_dataset(source_path, train_path, val_path)
+    envir_map_path = Path(__file__).parent.parent.parent / "datasets" / "haven" / "hdris" / "abandoned_church" / "abandoned_church_2k.hdr"
+    output_dir = Path(__file__).parent.parent.parent / "datasets" / "envmaps"
+    visualize_rotated_envir_map(envir_map_path, output_dir)

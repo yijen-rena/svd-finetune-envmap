@@ -100,14 +100,29 @@ class EnvMapTrainer:
     def train_epoch(self, epoch: int) -> float:
         self.unet.train()
         total_loss = 0
-
+        
+        # Add memory tracking at start of epoch
+        torch.cuda.reset_peak_memory_stats()
+        start_mem = torch.cuda.memory_allocated() / 1024**2
+        print(f"Starting epoch memory: {start_mem:.2f} MB")
+        
         progress_bar = tqdm(self.train_dataloader, desc=f"Training Epoch {epoch}")
         for batch_idx, envmaps in enumerate(progress_bar):
             envmaps = envmaps.to(self.device)
             
+            print("envmaps: ", envmaps.shape)
+            
+            # Track memory after loading batch
+            mem_after_load = torch.cuda.memory_allocated() / 1024**2
+            
             # Encode with VAE
             with torch.no_grad():
                 latents = self.encode_envmaps(envmaps)
+                
+            print("latents: ", latents.shape)
+            
+            # Track memory after VAE encoding
+            mem_after_vae = torch.cuda.memory_allocated() / 1024**2
             
             self.optimizer.zero_grad()
             
@@ -115,10 +130,36 @@ class EnvMapTrainer:
             output = self.unet(latents)
             loss = self.criterion(output.sample, latents)
             
+            # Track memory after forward pass
+            mem_after_forward = torch.cuda.memory_allocated() / 1024**2
+            
             # Backward pass
             loss.backward()
+            
+            # Track memory after backward pass
+            mem_after_backward = torch.cuda.memory_allocated() / 1024**2
+            
             self.optimizer.step()
-
+            
+            # Log memory stats periodically (e.g., first batch of epoch)
+            if batch_idx == 0:
+                peak_mem = torch.cuda.max_memory_allocated() / 1024**2
+                print(f"\nMemory usage:")
+                print(f"After batch load: {mem_after_load:.2f} MB")
+                print(f"After VAE encode: {mem_after_vae:.2f} MB")
+                print(f"After forward: {mem_after_forward:.2f} MB")
+                print(f"After backward: {mem_after_backward:.2f} MB")
+                print(f"Peak memory: {peak_mem:.2f} MB\n")
+            
+                if self.use_wandb:
+                    wandb.log({
+                        "memory/after_load": mem_after_load,
+                        "memory/after_vae": mem_after_vae,
+                        "memory/after_forward": mem_after_forward,
+                        "memory/after_backward": mem_after_backward,
+                        "memory/peak": peak_mem
+                    })
+                
             # Update progress bar
             total_loss += loss.item()
             avg_loss = total_loss / (batch_idx + 1)

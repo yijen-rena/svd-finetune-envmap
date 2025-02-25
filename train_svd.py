@@ -47,11 +47,13 @@ from packaging import version
 from tqdm.auto import tqdm
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 from einops import rearrange
+import json
 
 import diffusers
 from diffusers import StableVideoDiffusionPipeline
 from diffusers.models.lora import LoRALinearLayer
-from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler # UNetSpatioTemporalConditionModel
+# from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler, UNetSpatioTemporalConditionModel
+from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
@@ -588,6 +590,22 @@ def download_image(url):
     )(url)
     return original_image
 
+    
+def encode_envir_map(envir_map_path, camera_poses_path):
+    envir_map_hdr = read_hdr(envir_map_path)
+    with open(camera_poses_path, 'r') as f:
+        camera_poses = json.load(f)
+        
+    cam2world = np.array(camera_poses['frame_0'])
+    aligned_RT = get_aligned_RT(cam2world)
+        
+    envir_map_ldr, envir_map_log, envir_map_dir = rotate_and_preprocess_envir_map(envir_map_hdr, aligned_RT)
+
+    # envir_maps = torch.cat([envir_map_ldr, envir_map_log, envir_map_dir], dim=1)
+    envir_map_embeddings = vae.encode(envir_map_ldr).latent_dist.sample()
+        
+        
+    return envir_map_embeddings
 
 def main():
     args = parse_args()
@@ -771,11 +789,14 @@ def main():
     # TODO: change the parameters that need to be trained
     # Customize the parameters that need to be trained; if necessary, you can uncomment them yourself.
     for name, param in unet.named_parameters():
+        print(name)
         if 'temporal_transformer_block' in name:
             parameters_list.append(param)
             param.requires_grad = True
         else:
             param.requires_grad = False
+    
+    
     optimizer = optimizer_cls(
         parameters_list,
         lr=args.learning_rate,
@@ -986,6 +1007,11 @@ def main():
                 # Get the text embedding for conditioning.
                 encoder_hidden_states = encode_image(
                     pixel_values[:, 0, :, :, :].float())
+                
+                pdb.set_trace()
+
+
+                # encoder_hidden_states = encode_envir_map(envir_map_path)
 
                 # Here I input a fixed numerical value for 'motion_bucket_id', which is not reasonable.
                 # However, I am unable to fully align with the calculation method of the motion score,
@@ -1007,6 +1033,7 @@ def main():
                     # Sample masks for the edit prompts.
                     prompt_mask = random_p < 2 * args.conditioning_dropout_prob
                     prompt_mask = prompt_mask.reshape(bsz, 1, 1)
+                    
                     # Final text conditioning.
                     null_conditioning = torch.zeros_like(encoder_hidden_states)
                     encoder_hidden_states = torch.where(
@@ -1203,3 +1230,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # envir_map_path = "../datasets/haven/hdris/abandoned_church/abandoned_church_2k.hdr"
+    # camera_poses_path = "../random_paths/antique_ceramic_vase_01_illuminations/abandoned_church_2k_10/camera_poses.json"
+    # encode_envir_map(envir_map_path, camera_poses_path)
