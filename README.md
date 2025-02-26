@@ -43,27 +43,6 @@ This training configuration is for reference only, I set all parameters of unet 
 accelerate launch train_svd.py --pretrained_model_name_or_path=stabilityai/stable-video-diffusion-img2vid --width=256 --height=256 --base_folder=data --mixed_precision="fp16" --seed=42 --max_train_steps 100000 --report_to="wandb"
 ```
 
-
-## Part 2: Tracklet2Video
-
-### Tracklet2Video
-We have attempted to incorporate layout control on top of img2video, which makes the motion of objects more controllable, similar to what is demonstrated in the image below. The code and weights will be updated soon.
-It should be noted that we use a resolution of `512*320` for SVD to generate videos, so the quality of the generated videos appears to be poor (which is somewhat unfair to SVD), but our intention is to demonstrate the effectiveness of tracklet control, and we will resolve the issue with video quality as soon as possible.
-| Init Image        | Gen Video by SVD | Gen Video by Ours |
-|---------------|-----------------------------|-----------------------------|
-| ![demo1](https://github.com/pixeli99/SVD_Xtend/assets/46072190/e705b4bc-143d-4b56-ac52-df7a728e1731)    | ![svd1](https://github.com/pixeli99/SVD_Xtend/assets/46072190/6d6a44ef-3587-43d9-a078-1f8f4d293097)   |  ![gen1](https://github.com/pixeli99/SVD_Xtend/assets/46072190/35207fb6-343f-44aa-bef0-58d0fc7bd2c1)   |
-| ![demo2](https://github.com/pixeli99/SVD_Xtend/assets/46072190/7fe80f97-8a51-457a-b4d8-e20d14f9669e) | ![svd2](https://github.com/pixeli99/SVD_Xtend/assets/46072190/3d87df43-afc8-4917-aaa7-2c432d2cc6f6)   |  ![gen2](https://github.com/pixeli99/SVD_Xtend/assets/46072190/91a16c1d-02c9-4379-8d4a-8fd58f9f0913)   |
-
-### Methods
-
-We have utilized the `Self-Tracking` training from [Boximator](https://arxiv.org/abs/2402.01566) and the `Instance-Enhancer` from [TrackDiffusion](https://arxiv.org/abs/2312.00651).
-For more details, please refer to the paper.
-
-## :label: TODO List
-
-- [ ] Support text2video (WIP)
-- [x] Support more conditional inputs, such as layout
-
 ## :hearts: Acknowledgement
 
 Our model is related to [Diffusers](https://github.com/huggingface/diffusers) and [Stability AI](https://github.com/Stability-AI/generative-models). Thanks for their great work!
