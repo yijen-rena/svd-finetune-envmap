@@ -102,10 +102,27 @@ def generate_directional_embeddings(shape=(256, 256), world2cam=None, normalize=
 
     return embeddings
 
+def env_map_to_cam_to_world_by_convention(envmap: np.ndarray, c2w):
+    import cv2
+    R = c2w[:3,:3]
+    H, W = envmap.shape[:2]
+    theta, phi = np.meshgrid(np.linspace(-0.5*np.pi, 1.5*np.pi, W), np.linspace(0., np.pi, H))
+    viewdirs = np.stack([-np.cos(theta) * np.sin(phi), np.cos(phi), -np.sin(theta) * np.sin(phi)],
+                        axis=-1).reshape(H*W, 3)    # [H, W, 3]
+    viewdirs = (R.T @ viewdirs.T).T.reshape(H, W, 3)
+    viewdirs = viewdirs.reshape(H, W, 3)
+    # This corresponds to the convention of +Z at left, +Y at top
+    # -np.cos(theta) * np.sin(phi), np.cos(phi), -np.sin(theta) * np.sin(phi)
+    coord_y = ((np.arccos(viewdirs[..., 1].clip(-1, 1))/np.pi*(H-1)+H)%H).astype(np.float32)
+    coord_x = (((np.arctan2(viewdirs[...,0], -viewdirs[...,2])+np.pi)/2/np.pi*(W-1)+W)%W).astype(np.float32)
+    envmap_remapped = cv2.remap(envmap, coord_x, coord_y, cv2.INTER_LINEAR)
+
+    return envmap_remapped
+
 ##### Below are functions for preprocessing environment map, copied from Neural Gaffer #####
 
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
-def read_hdr(path):
+def read_hdr(path, return_type='np'):
     """Reads an HDR map from disk.
 
     Args:
@@ -122,10 +139,14 @@ def read_hdr(path):
         
     except Exception as e:
         print(f"Error reading HDR file {path}: {e}")
-        rgb = None
+        return None
+    
+    if return_type == 'np':
         return rgb
-    rgb = torch.from_numpy(rgb)
-    return rgb
+    elif return_type == 'torch':
+        return torch.from_numpy(rgb)
+    else:
+        raise ValueError(f"Invalid return type: {return_type}")
 
 def generate_envir_map_dir(envmap_h, envmap_w):
     lat_step_size = np.pi / envmap_h
@@ -435,6 +456,6 @@ def linear2srgb_torch(tensor_0to1):
     return tensor_srgb
 
 if __name__ == "__main__":
-    envir_map_path = Path(__file__).parent.parent.parent / "datasets" / "haven" / "hdris" / "abandoned_church" / "abandoned_church_2k.hdr"
-    output_dir = Path(__file__).parent.parent.parent / "datasets" / "envmaps"
-    visualize_rotated_envir_map(envir_map_path, output_dir)
+    # envir_map_path = Path(__file__).parent.parent.parent / "datasets" / "haven" / "hdris" / "abandoned_church" / "abandoned_church_2k.hdr"
+    # output_dir = Path(__file__).parent.parent.parent / "datasets" / "envmaps"
+    pass

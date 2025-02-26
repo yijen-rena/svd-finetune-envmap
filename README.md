@@ -40,7 +40,7 @@ self.base_folder
 ### Training Configuration(on the BDD100K dataset)
 This training configuration is for reference only, I set all parameters of unet to be trainable during the training and adopted a learning rate of 1e-5.
 ```bash
-accelerate launch train_svd.py --pretrained_model_name_or_path=stabilityai/stable-video-diffusion-img2vid --width=256 --height=256 --base_folder=data --mixed_precision="fp16" --seed=42 --max_train_steps 100
+accelerate launch train_svd.py --pretrained_model_name_or_path=stabilityai/stable-video-diffusion-img2vid --width=256 --height=256 --base_folder=data --mixed_precision="fp16" --seed=42 --max_train_steps 100000 --report_to="wandb"
 ```
 
 
