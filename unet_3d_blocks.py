@@ -40,6 +40,7 @@ from diffusers.models.unets.unet_motion_model import (
     UpBlockMotion,
 )
 
+import pdb
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -1038,9 +1039,20 @@ class UNetMidBlockSpatioTemporal(nn.Module):
             )
         ]
         attentions = []
+        envmap_attentions = []
 
         for i in range(num_layers):
             attentions.append(
+                TransformerSpatioTemporalModel(
+                    num_attention_heads,
+                    in_channels // num_attention_heads,
+                    in_channels=in_channels,
+                    num_layers=transformer_layers_per_block[i],
+                    cross_attention_dim=cross_attention_dim,
+                )
+            )
+            
+            envmap_attentions.append(
                 TransformerSpatioTemporalModel(
                     num_attention_heads,
                     in_channels // num_attention_heads,
@@ -1060,6 +1072,7 @@ class UNetMidBlockSpatioTemporal(nn.Module):
             )
 
         self.attentions = nn.ModuleList(attentions)
+        self.envmap_attentions = nn.ModuleList(envmap_attentions)
         self.resnets = nn.ModuleList(resnets)
 
         self.gradient_checkpointing = False
@@ -1076,23 +1089,42 @@ class UNetMidBlockSpatioTemporal(nn.Module):
             temb,
             image_only_indicator=image_only_indicator,
         )
+        
+        clip_image_embedding = encoder_hidden_states[:, :, :1024]
+        envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
 
-        for attn, resnet in zip(self.attentions, self.resnets[1:]):
+        for attn, envmap_attn, resnet in zip(self.attentions, self.envmap_attentions, self.resnets[1:]):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = attn(
                     hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=clip_image_embedding,
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
+                
+                hidden_states = envmap_attn(
+                    hidden_states,
+                    encoder_hidden_states=envmap_image_embedding,
+                    image_only_indicator=image_only_indicator,
+                    return_dict=False,
+                )[0]
+                
                 hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb, image_only_indicator)
             else:
                 hidden_states = attn(
                     hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=clip_image_embedding,
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
+                
+                hidden_states = envmap_attn(
+                    hidden_states,
+                    encoder_hidden_states=envmap_image_embedding,
+                    image_only_indicator=image_only_indicator,
+                    return_dict=False,
+                )[0]
+                
                 hidden_states = resnet(hidden_states, temb, image_only_indicator=image_only_indicator)
 
         return hidden_states
@@ -1178,6 +1210,7 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
         super().__init__()
         resnets = []
         attentions = []
+        envmap_attentions = []
 
         self.has_cross_attention = True
         self.num_attention_heads = num_attention_heads
@@ -1205,17 +1238,17 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
             )
             
             # envmap cross attention; follow the same structure as the original cross attention for now
-            # envmap_attentions.append(
-            #     TransformerSpatioTemporalModel(
-            #         num_attention_heads,
-            #         out_channels // num_attention_heads,
-            #         in_channels=out_channels,
-            #         num_layers=transformer_layers_per_block[i],
-            #         cross_attention_dim=cross_attention_dim,
-            #     )
-            # )
+            envmap_attentions.append(
+                TransformerSpatioTemporalModel(
+                    num_attention_heads,
+                    out_channels // num_attention_heads,
+                    in_channels=out_channels,
+                    num_layers=transformer_layers_per_block[i],
+                    cross_attention_dim=cross_attention_dim,
+                )
+            )
                 
-        # self.envmap_attentions = nn.ModuleList(envmap_attentions)
+        self.envmap_attentions = nn.ModuleList(envmap_attentions)
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
@@ -1244,26 +1277,46 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
         image_only_indicator: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         output_states = ()
+                
+        clip_image_embedding = encoder_hidden_states[:, :, :1024]
+        envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
 
-        blocks = list(zip(self.resnets, self.attentions))
-        for resnet, attn in blocks:
+        blocks = list(zip(self.resnets, self.attentions, self.envmap_attentions))
+        for resnet, attn, envmap_attn in blocks:
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb, image_only_indicator)
 
                 hidden_states = attn(
                     hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=clip_image_embedding,
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
+                
+                
+                hidden_states = envmap_attn(
+                    hidden_states,
+                    encoder_hidden_states=envmap_image_embedding,
+                    image_only_indicator=image_only_indicator,
+                    return_dict=False,
+                )[0]
+                
             else:
                 hidden_states = resnet(hidden_states, temb, image_only_indicator=image_only_indicator)
                 hidden_states = attn(
                     hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=clip_image_embedding,
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
+
+                hidden_states = envmap_attn(
+                    hidden_states,
+                    encoder_hidden_states=envmap_image_embedding,
+                    image_only_indicator=image_only_indicator,
+                    return_dict=False,
+                )[0]
+                
 
             output_states = output_states + (hidden_states,)
 
@@ -1359,6 +1412,7 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
         super().__init__()
         resnets = []
         attentions = []
+        envmap_attentions = []
 
         self.has_cross_attention = True
         self.num_attention_heads = num_attention_heads
@@ -1387,7 +1441,18 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
                     cross_attention_dim=cross_attention_dim,
                 )
             )
+            
+            envmap_attentions.append(
+                TransformerSpatioTemporalModel(
+                    num_attention_heads,
+                    out_channels // num_attention_heads,
+                    in_channels=out_channels,
+                    num_layers=transformer_layers_per_block[i],
+                    cross_attention_dim=cross_attention_dim,
+                )
+            )
 
+        self.envmap_attentions = nn.ModuleList(envmap_attentions)
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
@@ -1408,7 +1473,11 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
         image_only_indicator: Optional[torch.Tensor] = None,
         upsample_size: Optional[int] = None,
     ) -> torch.Tensor:
-        for resnet, attn in zip(self.resnets, self.attentions):
+        
+        clip_image_embedding = encoder_hidden_states[:, :, :1024]
+        envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
+
+        for resnet, attn, envmap_attn in zip(self.resnets, self.attentions, self.envmap_attentions):
             # pop res hidden states
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
@@ -1419,19 +1488,35 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
                 hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb, image_only_indicator)
                 hidden_states = attn(
                     hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=clip_image_embedding,
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
+                
+                hidden_states = envmap_attn(
+                    hidden_states,
+                    encoder_hidden_states=envmap_image_embedding,
+                    image_only_indicator=image_only_indicator,
+                    return_dict=False,
+                )[0]
+                
             else:
                 hidden_states = resnet(hidden_states, temb, image_only_indicator=image_only_indicator)
                 hidden_states = attn(
                     hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=clip_image_embedding,
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
-
+                
+                
+                hidden_states = envmap_attn(
+                    hidden_states,
+                    encoder_hidden_states=envmap_image_embedding,
+                    image_only_indicator=image_only_indicator,
+                    return_dict=False,
+                )[0]
+                
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
                 hidden_states = upsampler(hidden_states, upsample_size)

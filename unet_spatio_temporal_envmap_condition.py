@@ -10,8 +10,9 @@ from diffusers.utils import BaseOutput, logging
 from diffusers.models.attention_processor import CROSS_ATTENTION_PROCESSORS, AttentionProcessor, AttnProcessor
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin
-from diffusers.models.unets.unet_3d_blocks import UNetMidBlockSpatioTemporal, get_down_block, get_up_block
+# from diffusers.models.unets.unet_3d_blocks import UNetMidBlockSpatioTemporal, get_down_block, get_up_block
 
+from unet_3d_blocks import UNetMidBlockSpatioTemporal, get_down_block, get_up_block
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -29,7 +30,7 @@ class UNetSpatioTemporalConditionOutput(BaseOutput):
     sample: torch.Tensor = None
 
 
-class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, PeftAdapterMixin):
+class UNetSpatioTemporalWithEnvmapConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, PeftAdapterMixin):
     r"""
     A conditional Spatio-Temporal UNet model that takes a noisy video frames, conditional state, and a timestep and
     returns a sample shaped output.

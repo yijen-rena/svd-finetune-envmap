@@ -53,8 +53,7 @@ import json
 import diffusers
 from diffusers import StableVideoDiffusionPipeline
 from diffusers.models.lora import LoRALinearLayer
-# from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler, UNetSpatioTemporalConditionModel
-from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler
+from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler, UNetSpatioTemporalConditionModel
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
@@ -63,7 +62,7 @@ from diffusers.utils.import_utils import is_xformers_available
 
 from torch.utils.data import Dataset
 
-from unet_spatio_temporal_envmap_condition import UNetSpatioTemporalConditionModel
+from unet_spatio_temporal_envmap_condition import UNetSpatioTemporalWithEnvmapConditionModel
 
 from utils import *
 
@@ -115,16 +114,20 @@ class DummyDataset(Dataset):
             dict: A dictionary containing the 'pixel_values' tensor of shape (16, channels, 320, 512).
         """
         # Randomly select a folder (representing a video) from the base folder
-        chosen_folder = random.choice(self.folders)
-        folder_path = os.path.join(self.base_folder, chosen_folder)
-        frames = os.listdir(folder_path)
-        # Sort the frames by name # TODO: make sure this is sorted by int(frame_number)
-        frames.sort()
-
-        # Ensure the selected folder has at least `sample_frames`` frames
-        if len(frames) < self.sample_frames:
-            raise ValueError(
-                f"The selected folder '{chosen_folder}' contains fewer than `{self.sample_frames}` frames.")
+        while True:
+            chosen_folder = random.choice(self.folders)
+            folder_path = os.path.join(self.base_folder, chosen_folder)
+            if os.path.exists(folder_path):
+                frames = os.listdir(folder_path)
+                
+                # Ensure the selected folder has at least `sample_frames`` frames
+                if len(frames) < self.sample_frames:
+                    print(f"The selected folder '{chosen_folder}' contains fewer than `{self.sample_frames}` frames.")
+                    continue
+                
+                # Sort the frames by frame number
+                frames.sort(key=lambda x: int(x.split("_")[0]))
+                break
 
         # Randomly select a start index for frame sequence
         start_idx = random.randint(0, len(frames) - self.sample_frames)
@@ -157,6 +160,7 @@ class DummyDataset(Dataset):
                 pixel_values[i] = img_normalized
         return {'pixel_values': pixel_values}
 
+# TODO: @rju make this learnable
 class SpatialProjectionLayer(nn.Module):
     def __init__(self):
         super().__init__()
@@ -587,6 +591,12 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--wandb_run_id",
+        type=str,
+        default=None,
+        help="The wandb run id to resume from.",
+    )
+    parser.add_argument(
         "--enable_xformers_memory_efficient_attention",
         action="store_true",
         help="Whether or not to use xformers.",
@@ -619,7 +629,7 @@ def download_image(url):
     )(url)
     return original_image
 
-def log_validation(args, accelerator, unet, image_encoder, vae):
+def log_validation(args, accelerator, unet, image_encoder, vae, val_folders, val_save_dir):
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -628,7 +638,7 @@ def log_validation(args, accelerator, unet, image_encoder, vae):
 
     # run inference
     val_save_dir = os.path.join(
-        args.output_dir, "validation_images")
+        args.output_dir, val_save_dir)
 
     if not os.path.exists(val_save_dir):
         os.makedirs(val_save_dir)
@@ -638,10 +648,13 @@ def log_validation(args, accelerator, unet, image_encoder, vae):
     with torch.autocast(
         str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
     ):
-        for checkpoint_dir in checkpoint_dirs:
-            print("Loading checkpoint from ", os.path.join(args.output_dir, checkpoint_dir))
-            accelerator.load_state(os.path.join(args.output_dir, checkpoint_dir))
-            global_step = int(checkpoint_dir.split("-")[1])
+        # for checkpoint_dir in checkpoint_dirs:
+        #     print("Loading checkpoint from ", os.path.join(args.output_dir, checkpoint_dir))
+        #     accelerator.load_state(os.path.join(args.output_dir, checkpoint_dir))
+        #     global_step = int(checkpoint_dir.split("-")[1])
+        
+        global_step = 0
+        if True:
             
             # create pipeline
             if args.use_ema:
@@ -662,10 +675,13 @@ def log_validation(args, accelerator, unet, image_encoder, vae):
             pipeline = pipeline.to(accelerator.device)
             pipeline.set_progress_bar_config(disable=True)
             
-            for val_img_idx in range(args.num_validation_images):
+            for val_folder in val_folders:
                 num_frames = args.num_frames
+                init_img_path = os.path.join(args.base_folder, val_folder, "0_colors.png")
+                if not os.path.exists(init_img_path):
+                    continue
                 video_frames = pipeline(
-                    load_image('demo.jpg').resize((args.width, args.height)),
+                    load_image(init_img_path).resize((args.width, args.height)),
                     height=args.height,
                     width=args.width,
                     num_frames=num_frames,
@@ -678,7 +694,7 @@ def log_validation(args, accelerator, unet, image_encoder, vae):
 
                 out_file = os.path.join(
                     val_save_dir,
-                    f"step_{global_step}_val_img_{val_img_idx}.mp4",
+                    f"step_{global_step}_val_img_{val_folder}.mp4",
                 )
 
                 for i in range(num_frames):
@@ -758,12 +774,23 @@ def main():
     )
     vae = AutoencoderKLTemporalDecoder.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant="fp16")
-    unet = UNetSpatioTemporalConditionModel.from_pretrained(
+    # unet = UNetSpatioTemporalConditionModel.from_pretrained(
+    #     args.pretrained_model_name_or_path if args.pretrain_unet is None else args.pretrain_unet,
+    #     subfolder="unet",
+    #     low_cpu_mem_usage=True,
+    #     variant="fp16"
+    # )
+    
+    config = UNetSpatioTemporalConditionModel.load_config(
         args.pretrained_model_name_or_path if args.pretrain_unet is None else args.pretrain_unet,
         subfolder="unet",
-        low_cpu_mem_usage=True,
-        variant="fp16"
     )
+    unet = UNetSpatioTemporalWithEnvmapConditionModel(**config)
+    unet_pretrained = UNetSpatioTemporalConditionModel.from_pretrained(
+        args.pretrained_model_name_or_path if args.pretrain_unet is None else args.pretrain_unet,
+        subfolder="unet",
+    ).state_dict()
+    unet.load_state_dict(unet_pretrained, strict=False)
 
     # Freeze vae and image_encoder
     vae.requires_grad_(False)
@@ -831,8 +858,23 @@ def main():
                 load_model = UNetSpatioTemporalConditionModel.from_pretrained(
                     input_dir, subfolder="unet")
                 model.register_to_config(**load_model.config)
-
-                model.load_state_dict(load_model.state_dict())
+                
+                # @rju modified this to load weights only for original unet layers
+                # ================================================================
+                state_dict = load_model.state_dict()
+                
+                _, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+                print(f"Unexpected keys when loading pretrained weights: {len(unexpected_keys)}")
+                
+                for name, module in model.named_modules():
+                    if "env_attentions" in name:
+                        print(f"Initializing new module: {name}")
+                        if hasattr(module, "weight") and isinstance(module.weight, torch.nn.Parameter):
+                            torch.nn.init.xavier_uniform_(module.weight)
+                        if hasattr(module, "bias") and isinstance(module.bias, torch.nn.Parameter) and module.bias is not None:
+                            torch.nn.init.zeros_(module.bias)
+                # ================================================================
+                
                 del load_model
 
         accelerator.register_save_state_pre_hook(save_model_hook)
@@ -870,11 +912,14 @@ def main():
     # TODO: change the parameters that need to be trained
     # Customize the parameters that need to be trained; if necessary, you can uncomment them yourself.
     for name, param in unet.named_parameters():
-        if 'temporal_transformer_block' in name:
+        # if 'temporal_transformer_block' in name:
+        if 'envmap_attentions' in name:
             parameters_list.append(param)
             param.requires_grad = True
         else:
             param.requires_grad = False
+            
+    # pdb.set_trace()
     
     
     optimizer = optimizer_cls(
@@ -900,6 +945,12 @@ def main():
     # DataLoaders creation:
     args.global_batch_size = args.per_gpu_batch_size * accelerator.num_processes
 
+    data_split = os.path.join(args.base_folder, "split.json")
+    with open(data_split, "r") as f:
+        data_split = json.load(f)
+    train_folders = data_split["train"]
+    val_folders = data_split["val"]
+    
     train_dataset = DummyDataset(args.base_folder, width=args.width, height=args.height, sample_frames=args.num_frames)
     sampler = RandomSampler(train_dataset)
     train_dataloader = torch.utils.data.DataLoader(
@@ -948,7 +999,10 @@ def main():
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers("SVD Finetune EnvMap", config=vars(args))
+        if args.resume_from_checkpoint:
+            accelerator.init_trackers("SVD Finetune EnvMap", config=vars(args), init_kwargs={"wandb": {"resume": "allow", "id": args.wandb_run_id}})
+        else:
+            accelerator.init_trackers("SVD Finetune EnvMap", config=vars(args))
 
     # Train!
     total_batch_size = args.per_gpu_batch_size * \
@@ -1062,6 +1116,10 @@ def main():
                         disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
+
+    envir_map_path = Path(__file__).parent.parent.parent / "datasets" / "haven" / "hdris" / "aloe_farm_shade_house" / "aloe_farm_shade_house_2k.hdr"
+    camera_pose_path = Path(__file__).parent.parent.parent / "datasets" / "camera_poses" / "aloe_farm_shade_house" / "camera_poses.json"
+
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         train_loss = 0.0
@@ -1106,12 +1164,9 @@ def main():
                 inp_noisy_latents = noisy_latents / ((sigmas**2 + 1) ** 0.5)
 
                 # Get the text embedding for conditioning.
-                # encoder_hidden_states = encode_image(
-                #     pixel_values[:, 0, :, :, :].float())
+                encoder_hidden_states = encode_image(
+                    pixel_values[:, 0, :, :, :].float())
                 
-                envir_map_path = Path(__file__).parent.parent.parent / "datasets" / "haven" / "hdris" / "aloe_farm_shade_house" / "aloe_farm_shade_house_2k.hdr"
-                camera_pose_path = Path(__file__).parent.parent.parent / "datasets" / "camera_poses" / "aloe_farm_shade_house" / "camera_poses.json"
-                encoder_hidden_states = encode_envir_map(envir_map_path, camera_pose_path)
 
                 # Here I input a fixed numerical value for 'motion_bucket_id', which is not reasonable.
                 # However, I am unable to fully align with the calculation method of the motion score,
@@ -1156,6 +1211,13 @@ def main():
                     [inp_noisy_latents, conditional_latents], dim=2)
 
                 # check https://arxiv.org/abs/2206.00364(the EDM-framework) for more details.
+                
+
+                envmap_conditioning = encode_envir_map(envir_map_path, camera_pose_path)
+                envmap_conditioning = envmap_conditioning.unsqueeze(0)
+
+                encoder_hidden_states = torch.cat([encoder_hidden_states, envmap_conditioning], dim=-1)
+                
                 target = latents
                 model_pred = unet(
                     inp_noisy_latents, timesteps, encoder_hidden_states, added_time_ids=added_time_ids).sample
@@ -1266,27 +1328,32 @@ def main():
                         ):
                             for val_img_idx in range(args.num_validation_images):
                                 num_frames = args.num_frames
-                                video_frames = pipeline(
-                                    load_image('demo.jpg').resize((args.width, args.height)),
-                                    height=args.height,
-                                    width=args.width,
-                                    num_frames=num_frames,
-                                    decode_chunk_size=8,
-                                    motion_bucket_id=127,
-                                    fps=7,
-                                    noise_aug_strength=0.02,
-                                    # generator=generator,
-                                ).frames[0]
+                                for val_folder in val_folders:
+                                    init_img_path = os.path.join(args.base_folder, val_folder, "0_colors.png")
+                                    if not os.path.exists(init_img_path):
+                                        continue
+                                    video_frames = pipeline(
+                                        # load_image('demo.jpg').resize((args.width, args.height)),
+                                        load_image(init_img_path).resize((args.width, args.height)),
+                                        height=args.height,
+                                        width=args.width,
+                                        num_frames=num_frames,
+                                        decode_chunk_size=8,
+                                        motion_bucket_id=127,
+                                        fps=7,
+                                        noise_aug_strength=0.02,
+                                        # generator=generator,
+                                    ).frames[0]
 
-                                out_file = os.path.join(
-                                    val_save_dir,
-                                    f"step_{global_step}_val_img_{val_img_idx}.mp4",
-                                )
+                                    out_file = os.path.join(
+                                        val_save_dir,
+                                        f"step_{global_step}_val_img_{val_folder}.mp4",
+                                    )
 
-                                for i in range(num_frames):
-                                    img = video_frames[i]
-                                    video_frames[i] = np.array(img)
-                                export_to_gif(video_frames, out_file, 8)
+                                    for i in range(num_frames):
+                                        img = video_frames[i]
+                                        video_frames[i] = np.array(img)
+                                    export_to_gif(video_frames, out_file, 8)
 
                         if args.use_ema:
                             # Switch back to the original UNet parameters.
