@@ -79,7 +79,7 @@ def rand_log_normal(shape, loc=0., scale=1., device='cpu', dtype=torch.float32):
     return torch.distributions.Normal(loc, scale).icdf(u).exp()
 
 
-class DummyDataset(Dataset):
+class ImgWithEnvmapDataset(Dataset):
     def __init__(self, base_folder: str, num_samples=100000, width=1024, height=576, sample_frames=25):
         """
         Args:
@@ -90,6 +90,10 @@ class DummyDataset(Dataset):
         # Define the path to the folder containing video frames
         self.base_folder = base_folder
         # self.folders = os.listdir(self.base_folder)
+        
+        self.envmap_root = Path(__file__).parent.parent.parent / "datasets" / "haven" / "hdris"
+        self.camera_pose_root = Path(__file__).parent.parent.parent / "datasets" / "camera_poses"
+        
         self.channels = 3
         self.width = width
         self.height = height
@@ -159,7 +163,12 @@ class DummyDataset(Dataset):
                         dim=2, keepdim=True)  # For grayscale images
 
                 pixel_values[i] = img_normalized
-        return {'pixel_values': pixel_values}
+                
+        # Get envmap path
+        envmap_path = os.path.join(self.envmap_root, chosen_folder, f"{chosen_folder}_2k.hdr")
+        camera_pose_path = os.path.join(self.camera_pose_root, chosen_folder, "camera_poses.json")
+        
+        return {'pixel_values': pixel_values, 'envmap_path': envmap_path, 'camera_pose_path': camera_pose_path}
 
 # resizing utils
 # TODO: clean up later
@@ -325,6 +334,18 @@ def parse_args():
         "--base_folder",
         required=True,
         type=str,
+    )
+    parser.add_argument(
+        "--envmap_root",
+        type=str,
+        default="/ocean/projects/cis250002p/rju/datasets/haven/hdris",
+        help="Path to envmap root.",
+    )
+    parser.add_argument(
+        "--camera_pose_root",
+        type=str,
+        default="/ocean/projects/cis250002p/rju/datasets/camera_poses",
+        help="Path to camera pose root.",
     )
     parser.add_argument(
         "--pretrained_model_name_or_path",
@@ -928,7 +949,7 @@ def main():
     train_folders = data_split["train"]
     val_folders = data_split["val"]
     
-    train_dataset = DummyDataset(args.base_folder, width=args.width, height=args.height, sample_frames=args.num_frames)
+    train_dataset = ImgWithEnvmapDataset(args.base_folder, width=args.width, height=args.height, sample_frames=args.num_frames)
     sampler = RandomSampler(train_dataset)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -1104,11 +1125,6 @@ def main():
                         disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
-
-    # FIXME: right now only trains on one envmap, need to change to train on all envmaps
-    envir_map_path = Path(__file__).parent.parent.parent / "datasets" / "haven" / "hdris" / "aloe_farm_shade_house" / "aloe_farm_shade_house_2k.hdr"
-    camera_pose_path = Path(__file__).parent.parent.parent / "datasets" / "camera_poses" / "aloe_farm_shade_house" / "camera_poses.json"
-
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         train_loss = 0.0
@@ -1156,6 +1172,13 @@ def main():
                 encoder_hidden_states = encode_image(
                     pixel_values[:, 0, :, :, :].float())
                 
+                
+                # Get envmap embedding for conditioning.
+                envmap_encoder_hidden_states, _ = encode_envir_map(
+                    batch['envmap_path'],
+                    batch['camera_pose_path']
+                )
+                
 
                 # Here I input a fixed numerical value for 'motion_bucket_id', which is not reasonable.
                 # However, I am unable to fully align with the calculation method of the motion score,
@@ -1201,8 +1224,6 @@ def main():
 
                 # check https://arxiv.org/abs/2206.00364(the EDM-framework) for more details.
                 
-
-                envmap_encoder_hidden_states, _ = encode_envir_map(envir_map_path, camera_pose_path)
                 target = latents
                 model_pred = unet(
                     inp_noisy_latents,
@@ -1322,6 +1343,12 @@ def main():
                                     init_img_path = os.path.join(args.base_folder, val_folder, "0_colors.png")
                                     if not os.path.exists(init_img_path):
                                         continue
+                                    envmap_path = os.path.join(args.envmap_root, val_folder, f"{val_folder}_2k.hdr")
+                                    camera_pose_path = os.path.join(args.camera_pose_root, val_folder, "camera_poses.json")
+                                    envmap_encoder_hidden_states, _ = encode_envir_map(
+                                        envmap_path,
+                                        camera_pose_path
+                                    )
                                     video_frames = pipeline(
                                         # load_image('demo.jpg').resize((args.width, args.height)),
                                         load_image(init_img_path).resize((args.width, args.height)),
