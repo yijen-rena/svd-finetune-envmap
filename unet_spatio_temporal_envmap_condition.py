@@ -91,6 +91,7 @@ class UNetSpatioTemporalWithEnvmapConditionModel(ModelMixin, ConfigMixin, UNet2D
         projection_class_embeddings_input_dim: int = 768,
         layers_per_block: Union[int, Tuple[int]] = 2,
         cross_attention_dim: Union[int, Tuple[int]] = 1024,
+        envmap_cross_attention_dim: Union[int, Tuple[int]] = 2048,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
         num_attention_heads: Union[int, Tuple[int]] = (5, 10, 20, 20),
         num_frames: int = 25,
@@ -154,7 +155,12 @@ class UNetSpatioTemporalWithEnvmapConditionModel(ModelMixin, ConfigMixin, UNet2D
             cross_attention_dim = (cross_attention_dim,) * len(down_block_types)
 
         print(f"cross_attention_dim: {cross_attention_dim}")
+        
+        if isinstance(envmap_cross_attention_dim, int):
+            envmap_cross_attention_dim = (envmap_cross_attention_dim,) * len(down_block_types)
 
+        print(f"envmap_cross_attention_dim: {envmap_cross_attention_dim}")
+        
         if isinstance(layers_per_block, int):
             layers_per_block = [layers_per_block] * len(down_block_types)
 
@@ -180,6 +186,7 @@ class UNetSpatioTemporalWithEnvmapConditionModel(ModelMixin, ConfigMixin, UNet2D
                 add_downsample=not is_final_block,
                 resnet_eps=1e-5,
                 cross_attention_dim=cross_attention_dim[i],
+                envmap_cross_attention_dim=envmap_cross_attention_dim[i],
                 num_attention_heads=num_attention_heads[i],
                 resnet_act_fn="silu",
             )
@@ -362,6 +369,7 @@ class UNetSpatioTemporalWithEnvmapConditionModel(ModelMixin, ConfigMixin, UNet2D
         sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
+        envmap_encoder_hidden_states: torch.Tensor,
         added_time_ids: torch.Tensor,
         return_dict: bool = True,
     ) -> Union[UNetSpatioTemporalConditionOutput, Tuple]:
@@ -374,6 +382,8 @@ class UNetSpatioTemporalWithEnvmapConditionModel(ModelMixin, ConfigMixin, UNet2D
             timestep (`torch.Tensor` or `float` or `int`): The number of timesteps to denoise an input.
             encoder_hidden_states (`torch.Tensor`):
                 The encoder hidden states with shape `(batch, sequence_length, cross_attention_dim)`.
+            envmap_encoder_hidden_states (`torch.Tensor`):
+                The envmap encoder hidden states with shape `(batch, sequence_length, envmap_cross_attention_dim)`.
             added_time_ids: (`torch.Tensor`):
                 The additional time ids with shape `(batch, num_additional_ids)`. These are encoded with sinusoidal
                 embeddings and added to the time embeddings.
@@ -439,6 +449,7 @@ class UNetSpatioTemporalWithEnvmapConditionModel(ModelMixin, ConfigMixin, UNet2D
                     hidden_states=sample,
                     temb=emb,
                     encoder_hidden_states=encoder_hidden_states,
+                    envmap_encoder_hidden_states=envmap_encoder_hidden_states,
                     image_only_indicator=image_only_indicator,
                 )
             else:

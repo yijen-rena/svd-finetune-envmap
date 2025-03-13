@@ -51,7 +51,7 @@ from einops import rearrange
 import json
 
 import diffusers
-from diffusers import StableVideoDiffusionPipeline
+# from diffusers import StableVideoDiffusionPipeline
 from diffusers.models.lora import LoRALinearLayer
 from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler, UNetSpatioTemporalConditionModel
 from diffusers.image_processor import VaeImageProcessor
@@ -62,6 +62,7 @@ from diffusers.utils.import_utils import is_xformers_available
 
 from torch.utils.data import Dataset
 
+from pipeline_stable_video_diffusion_envmap import StableVideoDiffusionPipelineWithEnvmap
 from unet_spatio_temporal_envmap_condition import UNetSpatioTemporalWithEnvmapConditionModel
 
 from utils import *
@@ -179,7 +180,7 @@ class SpatialProjectionLayer(nn.Module):
         x_flat = x.reshape(batch_size, -1)
         x_proj = self.projection(x_flat)
         return x_proj.mean(dim=0, keepdim=True)  # Shape: [1, 1024]
-    
+
 
 # resizing utils
 # TODO: clean up later
@@ -663,7 +664,7 @@ def log_validation(args, accelerator, unet, image_encoder, vae, val_folders, val
                 ema_unet.copy_to(unet.parameters())
             
             # The models need unwrapping because for compatibility in distributed training mode.
-            pipeline = StableVideoDiffusionPipeline.from_pretrained(
+            pipeline = StableVideoDiffusionPipelineWithEnvmap.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet),
                 image_encoder=accelerator.unwrap_model(
@@ -919,9 +920,6 @@ def main():
         else:
             param.requires_grad = False
             
-    # pdb.set_trace()
-    
-    
     optimizer = optimizer_cls(
         parameters_list,
         lr=args.learning_rate,
@@ -1051,17 +1049,34 @@ def main():
         
         envir_map_remapped = env_map_to_cam_to_world_by_convention(envir_map_hdr, cam2world)
         envir_map_ldr = reinhard_tonemap(envir_map_remapped)
+        envir_map_ldr_img = Image.fromarray((envir_map_ldr * 255).astype(np.uint8)).convert('RGB')
+        
         envir_map_ldr = torch.from_numpy(envir_map_ldr).permute(2, 0, 1).unsqueeze(0).to(weight_dtype).to(
             accelerator.device, non_blocking=True
         )
         envir_map_embeddings = vae.encode(envir_map_ldr).latent_dist.sample()
         
-        spatial_projection_layer = SpatialProjectionLayer().to(weight_dtype).to(
-            accelerator.device, non_blocking=True
+        # downsample envmap_image_embedding by factor of 8
+        envir_map_embeddings = F.interpolate(
+            envir_map_embeddings,
+            size=(
+                envir_map_embeddings.shape[-2] // 8,
+                envir_map_embeddings.shape[-1] // 8
+            ),
+            mode='bilinear',
+            align_corners=False
         )
-        envir_map_embeddings = spatial_projection_layer(envir_map_embeddings)
+        # flatten and repeat envmap_image_embedding for each frame
+        envir_map_embeddings = envir_map_embeddings.flatten(start_dim=1) # [batch_size, 4 * H // 8 * W // 8]
+        envir_map_embeddings = envir_map_embeddings.repeat(25, 1, 1)
+
+        
+        # spatial_projection_layer = SpatialProjectionLayer().to(weight_dtype).to(
+        #     accelerator.device, non_blocking=True
+        # )
+        # envir_map_embeddings = spatial_projection_layer(envir_map_embeddings)
             
-        return envir_map_embeddings
+        return envir_map_embeddings, envir_map_ldr_img
 
     def _get_add_time_ids(
         fps,
@@ -1117,6 +1132,7 @@ def main():
     progress_bar.set_description("Steps")
 
 
+    # FIXME: right now only trains on one envmap, need to change to train on all envmaps
     envir_map_path = Path(__file__).parent.parent.parent / "datasets" / "haven" / "hdris" / "aloe_farm_shade_house" / "aloe_farm_shade_house_2k.hdr"
     camera_pose_path = Path(__file__).parent.parent.parent / "datasets" / "camera_poses" / "aloe_farm_shade_house" / "camera_poses.json"
 
@@ -1213,14 +1229,15 @@ def main():
                 # check https://arxiv.org/abs/2206.00364(the EDM-framework) for more details.
                 
 
-                envmap_conditioning = encode_envir_map(envir_map_path, camera_pose_path)
-                envmap_conditioning = envmap_conditioning.unsqueeze(0)
-
-                encoder_hidden_states = torch.cat([encoder_hidden_states, envmap_conditioning], dim=-1)
-                
+                envmap_encoder_hidden_states, _ = encode_envir_map(envir_map_path, camera_pose_path)
                 target = latents
                 model_pred = unet(
-                    inp_noisy_latents, timesteps, encoder_hidden_states, added_time_ids=added_time_ids).sample
+                    inp_noisy_latents,
+                    timesteps,
+                    encoder_hidden_states,
+                    envmap_encoder_hidden_states,
+                    added_time_ids=added_time_ids
+                ).sample
 
                 # Denoise the latents
                 c_out = -sigmas / ((sigmas**2 + 1)**0.5)
@@ -1304,7 +1321,7 @@ def main():
                             ema_unet.store(unet.parameters())
                             ema_unet.copy_to(unet.parameters())
                         # The models need unwrapping because for compatibility in distributed training mode.
-                        pipeline = StableVideoDiffusionPipeline.from_pretrained(
+                        pipeline = StableVideoDiffusionPipelineWithEnvmap.from_pretrained(
                             args.pretrained_model_name_or_path,
                             unet=accelerator.unwrap_model(unet),
                             image_encoder=accelerator.unwrap_model(
@@ -1335,6 +1352,7 @@ def main():
                                     video_frames = pipeline(
                                         # load_image('demo.jpg').resize((args.width, args.height)),
                                         load_image(init_img_path).resize((args.width, args.height)),
+                                        envmap_encoder_hidden_states=envmap_encoder_hidden_states,
                                         height=args.height,
                                         width=args.width,
                                         num_frames=num_frames,
@@ -1376,7 +1394,7 @@ def main():
         if args.use_ema:
             ema_unet.copy_to(unet.parameters())
 
-        pipeline = StableVideoDiffusionPipeline.from_pretrained(
+        pipeline = StableVideoDiffusionPipelineWithEnvmap.from_pretrained(
             args.pretrained_model_name_or_path,
             image_encoder=accelerator.unwrap_model(image_encoder),
             vae=accelerator.unwrap_model(vae),

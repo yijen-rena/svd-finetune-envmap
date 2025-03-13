@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from diffusers.utils import deprecate, logging
 from diffusers.utils.torch_utils import apply_freeu
@@ -92,6 +93,7 @@ def get_down_block(
     num_attention_heads: int,
     resnet_groups: Optional[int] = None,
     cross_attention_dim: Optional[int] = None,
+    envmap_cross_attention_dim: Optional[int] = None,
     downsample_padding: Optional[int] = None,
     dual_cross_attention: bool = False,
     use_linear_projection: bool = True,
@@ -166,6 +168,7 @@ def get_down_block(
             transformer_layers_per_block=transformer_layers_per_block,
             add_downsample=add_downsample,
             cross_attention_dim=cross_attention_dim,
+            envmap_cross_attention_dim=envmap_cross_attention_dim,
             num_attention_heads=num_attention_heads,
         )
 
@@ -1039,7 +1042,7 @@ class UNetMidBlockSpatioTemporal(nn.Module):
             )
         ]
         attentions = []
-        envmap_attentions = []
+        # envmap_attentions = []
 
         for i in range(num_layers):
             attentions.append(
@@ -1052,15 +1055,15 @@ class UNetMidBlockSpatioTemporal(nn.Module):
                 )
             )
             
-            envmap_attentions.append(
-                TransformerSpatioTemporalModel(
-                    num_attention_heads,
-                    in_channels // num_attention_heads,
-                    in_channels=in_channels,
-                    num_layers=transformer_layers_per_block[i],
-                    cross_attention_dim=cross_attention_dim,
-                )
-            )
+            # envmap_attentions.append(
+            #     TransformerSpatioTemporalModel(
+            #         num_attention_heads,
+            #         in_channels // num_attention_heads,
+            #         in_channels=in_channels,
+            #         num_layers=transformer_layers_per_block[i],
+            #         cross_attention_dim=cross_attention_dim,
+            #     )
+            # )
 
             resnets.append(
                 SpatioTemporalResBlock(
@@ -1072,7 +1075,7 @@ class UNetMidBlockSpatioTemporal(nn.Module):
             )
 
         self.attentions = nn.ModuleList(attentions)
-        self.envmap_attentions = nn.ModuleList(envmap_attentions)
+        # self.envmap_attentions = nn.ModuleList(envmap_attentions)
         self.resnets = nn.ModuleList(resnets)
 
         self.gradient_checkpointing = False
@@ -1090,10 +1093,13 @@ class UNetMidBlockSpatioTemporal(nn.Module):
             image_only_indicator=image_only_indicator,
         )
         
-        clip_image_embedding = encoder_hidden_states[:, :, :1024]
-        envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
+        # clip_image_embedding = encoder_hidden_states[:, :, :1024]
+        # envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
 
-        for attn, envmap_attn, resnet in zip(self.attentions, self.envmap_attentions, self.resnets[1:]):
+        clip_image_embedding = encoder_hidden_states
+
+        # for attn, envmap_attn, resnet in zip(self.attentions, self.envmap_attentions, self.resnets[1:]):
+        for attn, resnet in zip(self.attentions, self.resnets[1:]):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = attn(
                     hidden_states,
@@ -1102,12 +1108,12 @@ class UNetMidBlockSpatioTemporal(nn.Module):
                     return_dict=False,
                 )[0]
                 
-                hidden_states = envmap_attn(
-                    hidden_states,
-                    encoder_hidden_states=envmap_image_embedding,
-                    image_only_indicator=image_only_indicator,
-                    return_dict=False,
-                )[0]
+                # hidden_states = envmap_attn(
+                #     hidden_states,
+                #     encoder_hidden_states=envmap_image_embedding,
+                #     image_only_indicator=image_only_indicator,
+                #     return_dict=False,
+                # )[0]
                 
                 hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb, image_only_indicator)
             else:
@@ -1118,12 +1124,12 @@ class UNetMidBlockSpatioTemporal(nn.Module):
                     return_dict=False,
                 )[0]
                 
-                hidden_states = envmap_attn(
-                    hidden_states,
-                    encoder_hidden_states=envmap_image_embedding,
-                    image_only_indicator=image_only_indicator,
-                    return_dict=False,
-                )[0]
+                # hidden_states = envmap_attn(
+                #     hidden_states,
+                #     encoder_hidden_states=envmap_image_embedding,
+                #     image_only_indicator=image_only_indicator,
+                #     return_dict=False,
+                # )[0]
                 
                 hidden_states = resnet(hidden_states, temb, image_only_indicator=image_only_indicator)
 
@@ -1205,6 +1211,7 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
         transformer_layers_per_block: Union[int, Tuple[int]] = 1,
         num_attention_heads: int = 1,
         cross_attention_dim: int = 1280,
+        envmap_cross_attention_dim: int = 2048,
         add_downsample: bool = True,
     ):
         super().__init__()
@@ -1244,7 +1251,7 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
                     out_channels // num_attention_heads,
                     in_channels=out_channels,
                     num_layers=transformer_layers_per_block[i],
-                    cross_attention_dim=cross_attention_dim,
+                    cross_attention_dim=envmap_cross_attention_dim,
                 )
             )
                 
@@ -1274,12 +1281,15 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
         hidden_states: torch.Tensor,
         temb: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
+        envmap_encoder_hidden_states: Optional[torch.Tensor] = None,
         image_only_indicator: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         output_states = ()
                 
-        clip_image_embedding = encoder_hidden_states[:, :, :1024]
-        envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
+        # clip_image_embedding = encoder_hidden_states[:, :, :1024]
+        # envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
+        clip_image_embedding = encoder_hidden_states
+        envmap_image_embedding = envmap_encoder_hidden_states
 
         blocks = list(zip(self.resnets, self.attentions, self.envmap_attentions))
         for resnet, attn, envmap_attn in blocks:
@@ -1292,8 +1302,7 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
-                
-                
+                                
                 hidden_states = envmap_attn(
                     hidden_states,
                     encoder_hidden_states=envmap_image_embedding,
@@ -1309,7 +1318,10 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
-
+                
+                # print("envmap_image_embedding.shape", envmap_image_embedding.shape)
+                # print("hidden_states.shape", hidden_states.shape)
+                
                 hidden_states = envmap_attn(
                     hidden_states,
                     encoder_hidden_states=envmap_image_embedding,
@@ -1412,7 +1424,7 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
         super().__init__()
         resnets = []
         attentions = []
-        envmap_attentions = []
+        # envmap_attentions = []
 
         self.has_cross_attention = True
         self.num_attention_heads = num_attention_heads
@@ -1442,17 +1454,17 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
                 )
             )
             
-            envmap_attentions.append(
-                TransformerSpatioTemporalModel(
-                    num_attention_heads,
-                    out_channels // num_attention_heads,
-                    in_channels=out_channels,
-                    num_layers=transformer_layers_per_block[i],
-                    cross_attention_dim=cross_attention_dim,
-                )
-            )
+            # envmap_attentions.append(
+            #     TransformerSpatioTemporalModel(
+            #         num_attention_heads,
+            #         out_channels // num_attention_heads,
+            #         in_channels=out_channels,
+            #         num_layers=transformer_layers_per_block[i],
+            #         cross_attention_dim=cross_attention_dim,
+            #     )
+            # )
 
-        self.envmap_attentions = nn.ModuleList(envmap_attentions)
+        # self.envmap_attentions = nn.ModuleList(envmap_attentions)
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
@@ -1474,10 +1486,13 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
         upsample_size: Optional[int] = None,
     ) -> torch.Tensor:
         
-        clip_image_embedding = encoder_hidden_states[:, :, :1024]
-        envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
+        # clip_image_embedding = encoder_hidden_states[:, :, :1024]
+        # envmap_image_embedding = encoder_hidden_states[:, :, 1024:]
 
-        for resnet, attn, envmap_attn in zip(self.resnets, self.attentions, self.envmap_attentions):
+        clip_image_embedding = encoder_hidden_states
+
+        # for resnet, attn, envmap_attn in zip(self.resnets, self.attentions, self.envmap_attentions):
+        for resnet, attn in zip(self.resnets, self.attentions):
             # pop res hidden states
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
@@ -1493,12 +1508,12 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
                     return_dict=False,
                 )[0]
                 
-                hidden_states = envmap_attn(
-                    hidden_states,
-                    encoder_hidden_states=envmap_image_embedding,
-                    image_only_indicator=image_only_indicator,
-                    return_dict=False,
-                )[0]
+                # hidden_states = envmap_attn(
+                #     hidden_states,
+                #     encoder_hidden_states=envmap_image_embedding,
+                #     image_only_indicator=image_only_indicator,
+                #     return_dict=False,
+                # )[0]
                 
             else:
                 hidden_states = resnet(hidden_states, temb, image_only_indicator=image_only_indicator)
@@ -1510,12 +1525,12 @@ class CrossAttnUpBlockSpatioTemporal(nn.Module):
                 )[0]
                 
                 
-                hidden_states = envmap_attn(
-                    hidden_states,
-                    encoder_hidden_states=envmap_image_embedding,
-                    image_only_indicator=image_only_indicator,
-                    return_dict=False,
-                )[0]
+                # hidden_states = envmap_attn(
+                #     hidden_states,
+                #     encoder_hidden_states=envmap_image_embedding,
+                #     image_only_indicator=image_only_indicator,
+                #     return_dict=False,
+                # )[0]
                 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
