@@ -161,27 +161,6 @@ class DummyDataset(Dataset):
                 pixel_values[i] = img_normalized
         return {'pixel_values': pixel_values}
 
-# TODO: @rju make this learnable
-class SpatialProjectionLayer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.spatial_pool = nn.AdaptiveAvgPool2d((8, 8))  # Reduce spatial dims
-        # Input dim: 4 * 8 * 8 = 256
-        self.projection = nn.Sequential(
-            nn.Linear(256, 512),
-            nn.ReLU(),
-            nn.Linear(512, 1024)
-        )
-        
-    def forward(self, x):
-        # x shape: [batch_size, 4, 128, 256]
-        batch_size = x.shape[0]
-        x = self.spatial_pool(x)  # Shape: [batch_size, 4, 8, 8]
-        x_flat = x.reshape(batch_size, -1)
-        x_proj = self.projection(x_flat)
-        return x_proj.mean(dim=0, keepdim=True)  # Shape: [1, 1024]
-
-
 # resizing utils
 # TODO: clean up later
 def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corners=True):
@@ -1069,13 +1048,7 @@ def main():
         # flatten and repeat envmap_image_embedding for each frame
         envir_map_embeddings = envir_map_embeddings.flatten(start_dim=1) # [batch_size, 4 * H // 8 * W // 8]
         envir_map_embeddings = envir_map_embeddings.repeat(25, 1, 1)
-
         
-        # spatial_projection_layer = SpatialProjectionLayer().to(weight_dtype).to(
-        #     accelerator.device, non_blocking=True
-        # )
-        # envir_map_embeddings = spatial_projection_layer(envir_map_embeddings)
-            
         return envir_map_embeddings, envir_map_ldr_img
 
     def _get_add_time_ids(
