@@ -167,7 +167,7 @@ class ImgWithEnvmapDataset(Dataset):
         # Get envmap path
         envmap_path = os.path.join(self.envmap_root, chosen_folder, f"{chosen_folder}_2k.hdr")
         camera_pose_path = os.path.join(self.camera_pose_root, chosen_folder, "camera_poses.json")
-        
+
         return {'pixel_values': pixel_values, 'envmap_path': envmap_path, 'camera_pose_path': camera_pose_path}
 
 # resizing utils
@@ -1041,6 +1041,12 @@ def main():
         return image_embeddings
     
     def encode_envir_map(envir_map_path, camera_poses_path):
+        if isinstance(envir_map_path, list):
+            envir_map_path = envir_map_path[0]
+        
+        if isinstance(camera_poses_path, list):
+            camera_poses_path = camera_poses_path[0]
+        
         envir_map_hdr = read_hdr(envir_map_path, return_type='np')
         with open(camera_poses_path, 'r') as f:
             camera_poses = json.load(f)
@@ -1134,6 +1140,9 @@ def main():
                 if step % args.gradient_accumulation_steps == 0:
                     progress_bar.update(1)
                 continue
+            
+            image_encoder.to(accelerator.device, dtype=weight_dtype)
+            vae.to(accelerator.device, dtype=weight_dtype)
 
             with accelerator.accumulate(unet):
                 # first, convert images to latent space.
@@ -1142,7 +1151,8 @@ def main():
                 )
                 conditional_pixel_values = pixel_values[:, 0:1, :, :, :]
 
-                latents = tensor_to_vae_latent(pixel_values, vae)
+                with torch.no_grad():
+                    latents = tensor_to_vae_latent(pixel_values, vae)
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
@@ -1169,17 +1179,23 @@ def main():
                 inp_noisy_latents = noisy_latents / ((sigmas**2 + 1) ** 0.5)
 
                 # Get the text embedding for conditioning.
-                encoder_hidden_states = encode_image(
-                    pixel_values[:, 0, :, :, :].float())
+                with torch.no_grad():
+                    encoder_hidden_states = encode_image(
+                        pixel_values[:, 0, :, :, :].float())
                 
                 
                 # Get envmap embedding for conditioning.
-                envmap_encoder_hidden_states, _ = encode_envir_map(
-                    batch['envmap_path'],
-                    batch['camera_pose_path']
-                )
+                with torch.no_grad():
+                    envmap_encoder_hidden_states, _ = encode_envir_map(
+                        batch['envmap_path'],
+                        batch['camera_pose_path']
+                    )
+                    
+                # Offload models to CPU
+                vae.to("cpu")
+                image_encoder.to("cpu")
+                torch.cuda.empty_cache()
                 
-
                 # Here I input a fixed numerical value for 'motion_bucket_id', which is not reasonable.
                 # However, I am unable to fully align with the calculation method of the motion score,
                 # so I adopted this approach. The same applies to the 'fps' (frames per second).
@@ -1309,6 +1325,10 @@ def main():
                         logger.info(
                             f"Running validation... \n Generating {args.num_validation_images} videos."
                         )
+                        
+                        image_encoder.to(accelerator.device, dtype=weight_dtype)
+                        vae.to(accelerator.device, dtype=weight_dtype)
+
                         # create pipeline
                         if args.use_ema:
                             # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
